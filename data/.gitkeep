@@ -1,0 +1,2 @@
+# This directory holds the PaySim dataset CSV
+# Run: python scripts/download_dataset.py

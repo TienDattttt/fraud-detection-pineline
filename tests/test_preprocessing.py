@@ -1,0 +1,149 @@
+"""
+Unit tests for spark/preprocessing.py.
+
+Tests feature engineering functions and ML pipeline creation.
+All tests use PySpark local mode — no cluster needed.
+"""
+import pytest
+
+
+class TestAddEngineeredFeatures:
+    """Test add_engineered_features() function."""
+
+    def test_balance_diff_orig(self, sample_paysim_data):
+        """Balance diff should equal old - new balance."""
+        from preprocessing import add_engineered_features
+
+        result = add_engineered_features(sample_paysim_data)
+        row = result.collect()[0]
+
+        expected = row["oldbalanceOrg"] - row["newbalanceOrig"]
+        assert row["balance_diff_orig"] == pytest.approx(expected)
+
+    def test_balance_diff_dest(self, sample_paysim_data):
+        """Dest balance diff should equal new - old."""
+        from preprocessing import add_engineered_features
+
+        result = add_engineered_features(sample_paysim_data)
+        # Use the CASH_OUT row (index 3) which has non-zero dest balances
+        rows = result.collect()
+        cashout_row = rows[3]
+
+        expected = (
+            cashout_row["newbalanceDest"]
+            - cashout_row["oldbalanceDest"]
+        )
+        assert cashout_row["balance_diff_dest"] == pytest.approx(expected)
+
+    def test_amount_ratio(self, sample_paysim_data):
+        """Amount ratio = amount / (oldbalanceOrg + 1)."""
+        from preprocessing import add_engineered_features
+
+        result = add_engineered_features(sample_paysim_data)
+        row = result.collect()[0]
+
+        expected = row["amount"] / (row["oldbalanceOrg"] + 1.0)
+        assert row["amount_ratio"] == pytest.approx(expected, rel=1e-4)
+
+    def test_is_zero_balance_fraud(self, sample_paysim_data):
+        """Fraud transaction that drains account should have is_zero_balance=1."""
+        from preprocessing import add_engineered_features
+
+        result = add_engineered_features(sample_paysim_data)
+        # Row index 2: fraud TRANSFER, newbalanceOrig = 0
+        fraud_row = result.collect()[2]
+
+        assert fraud_row["is_zero_balance_orig"] == 1.0
+
+    def test_is_zero_balance_normal(self, sample_paysim_data):
+        """Normal transaction with remaining balance should have is_zero_balance=0."""
+        from preprocessing import add_engineered_features
+
+        result = add_engineered_features(sample_paysim_data)
+        # Row index 0: normal PAYMENT, newbalanceOrig = 160296.36
+        normal_row = result.collect()[0]
+
+        assert normal_row["is_zero_balance_orig"] == 0.0
+
+    def test_is_large_amount(self, sample_paysim_data):
+        """Transaction > 200,000 should be flagged as large."""
+        from preprocessing import add_engineered_features
+
+        result = add_engineered_features(sample_paysim_data)
+        rows = result.collect()
+
+        # Row 3: CASH_OUT 500,000 → large
+        assert rows[3]["is_large_amount"] == 1.0
+        # Row 0: PAYMENT 9,839.64 → not large
+        assert rows[0]["is_large_amount"] == 0.0
+
+    def test_output_columns_added(self, sample_paysim_data):
+        """Should add exactly 5 engineered feature columns."""
+        from preprocessing import add_engineered_features
+
+        result = add_engineered_features(sample_paysim_data)
+        new_cols = set(result.columns) - set(sample_paysim_data.columns)
+
+        expected_new = {
+            "balance_diff_orig",
+            "balance_diff_dest",
+            "amount_ratio",
+            "is_zero_balance_orig",
+            "is_large_amount",
+        }
+        assert new_cols == expected_new
+
+
+class TestPrepareDataframe:
+    """Test prepare_dataframe() function."""
+
+    def test_label_column_created(self, sample_paysim_data):
+        """isFraud should be renamed to label."""
+        from preprocessing import prepare_dataframe
+
+        result = prepare_dataframe(sample_paysim_data)
+        assert "label" in result.columns
+        assert "isFraud" not in result.columns
+
+    def test_label_values(self, sample_paysim_data):
+        """Label should be double (0.0 or 1.0)."""
+        from preprocessing import prepare_dataframe
+
+        result = prepare_dataframe(sample_paysim_data)
+        labels = [row["label"] for row in result.select("label").collect()]
+
+        assert all(isinstance(l, float) for l in labels)
+        assert set(labels) == {0.0, 1.0}
+
+
+class TestCreateFeaturePipeline:
+    """Test create_feature_pipeline() function."""
+
+    def test_pipeline_stages(self):
+        """Pipeline should have 3 stages: StringIndexer, VectorAssembler, StandardScaler."""
+        from preprocessing import create_feature_pipeline
+
+        pipeline = create_feature_pipeline()
+        stages = pipeline.getStages()
+
+        assert len(stages) == 3
+        assert "StringIndexer" in type(stages[0]).__name__
+        assert "VectorAssembler" in type(stages[1]).__name__
+        assert "StandardScaler" in type(stages[2]).__name__
+
+    def test_pipeline_fit_transform(self, sample_paysim_data):
+        """Pipeline should fit and produce 'features' column."""
+        from preprocessing import (
+            create_feature_pipeline,
+            prepare_dataframe,
+        )
+
+        prepared = prepare_dataframe(sample_paysim_data)
+        pipeline = create_feature_pipeline()
+
+        model = pipeline.fit(prepared)
+        result = model.transform(prepared)
+
+        assert "features" in result.columns
+        assert "type_index" in result.columns
+        assert result.count() == sample_paysim_data.count()

@@ -1,0 +1,33 @@
+# Data
+data/*.csv
+data/*.zip
+
+# Models
+models/fraud_pipeline_model/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Docker volumes
+namenode_data/
+datanode_data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
+
+# MLflow
+mlruns/
