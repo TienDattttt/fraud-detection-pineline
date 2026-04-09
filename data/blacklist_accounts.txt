@@ -1,0 +1,6 @@
+# Default blacklist accounts for rule-based fraud alerts.
+# Any TRANSFER into one of these destination accounts will trigger
+# a BLACKLIST_RULE alert in the streaming pipeline.
+
+C553264065
+C38997010

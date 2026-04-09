@@ -67,19 +67,25 @@ class TestKPIsEndpoint:
         data = response.json()
         assert data["total_transactions"] == 0
         assert data["total_fraud"] == 0
+        assert data["total_ml_alerts"] == 0
+        assert data["total_rule_alerts"] == 0
         assert data["fraud_rate"] == 0.0
 
     def test_kpis_with_data(self, client, mock_redis):
         """KPIs return correct values."""
         mock_redis.get = AsyncMock(
             side_effect=lambda k: "1000" if k == "total_transactions"
-            else "13" if k == "total_fraud" else None
+            else "13" if k == "total_fraud"
+            else "8" if k == "total_ml_alerts"
+            else "5" if k == "total_rule_alerts" else None
         )
         response = client.get("/kpis")
         assert response.status_code == 200
         data = response.json()
         assert data["total_transactions"] == 1000
         assert data["total_fraud"] == 13
+        assert data["total_ml_alerts"] == 8
+        assert data["total_rule_alerts"] == 5
         assert data["fraud_rate"] == pytest.approx(1.3, rel=0.01)
 
 

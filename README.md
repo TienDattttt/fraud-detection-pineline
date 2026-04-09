@@ -83,6 +83,32 @@ docker exec spark-master python3 /opt/spark/work/producer/kafka_producer.py --sp
 - HDFS UI: http://localhost:9870
 - Spark UI: http://localhost:8081
 
+## Blacklist Rule
+
+The streaming pipeline combines:
+- ML fraud prediction from the trained PaySim model
+- A rule-based alert for `TRANSFER` transactions into destination
+  accounts listed in `data/blacklist_accounts.txt`
+
+You can customize the blacklist with:
+```bash
+# One account per line
+data/blacklist_accounts.txt
+
+# or override via env when running spark-submit
+BLACKLIST_ACCOUNTS=C553264065,C38997010
+BLACKLIST_TRANSFER_TYPES=TRANSFER
+```
+
+## Dataset Strategy
+
+- `PaySim` is the primary dataset for the real-time pipeline:
+  producer -> Kafka -> Spark Structured Streaming -> Redis/HDFS
+- `creditcard.csv` is a secondary reference dataset for offline
+  benchmarking and model comparison only
+- The live streaming demo, blacklist rule, and alert APIs are all built
+  around the PaySim transaction schema
+
 ##  Cấu trúc project
 
 ```
@@ -144,7 +170,7 @@ fraud-detection-pipeline/
 | Method | Path | Mô tả |
 |--------|------|--------|
 | GET | `/health` | Health check |
-| GET | `/kpis` | Tổng GD, tổng fraud, fraud rate |
+| GET | `/kpis` | Tổng GD, tổng alert, breakdown ML/rule, fraud rate |
 | GET | `/recent-alerts?limit=50` | 50 cảnh báo gần nhất |
 | GET | `/stream/alerts` | SSE push fraud alerts real-time |
 | GET | `/model-metrics` | Accuracy, AUC... của model |

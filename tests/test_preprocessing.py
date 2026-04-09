@@ -147,3 +147,87 @@ class TestCreateFeaturePipeline:
         assert "features" in result.columns
         assert "type_index" in result.columns
         assert result.count() == sample_paysim_data.count()
+
+
+class TestStreamingBlacklistRules:
+    """Test blacklist-based rule alert enrichment."""
+
+    def test_blacklist_transfer_becomes_rule_alert(self, sample_paysim_data):
+        """TRANSFER into a blacklisted destination should trigger rule alert."""
+        from streaming_pipeline import add_rule_based_alerts
+        from pyspark.sql import functions as F
+
+        predictions = sample_paysim_data.withColumn("prediction", F.lit(0.0))
+        predictions = predictions.withColumn(
+            "fraud_probability", F.lit(0.05)
+        )
+
+        result = add_rule_based_alerts(
+            predictions,
+            blacklist_accounts=["C553264065"],
+        )
+        transfer_row = next(
+            row for row in result.collect()
+            if row["nameDest"] == "C553264065"
+        )
+
+        assert transfer_row["is_blacklist_destination"] == 1.0
+        assert transfer_row["is_rule_alert"] == 1.0
+        assert transfer_row["is_alert"] == 1.0
+        assert transfer_row["alert_source"] == "BLACKLIST_RULE"
+
+    def test_ml_alert_and_blacklist_merge_sources(self, sample_paysim_data):
+        """ML and blacklist alerts should be merged into a combined source."""
+        from streaming_pipeline import add_rule_based_alerts
+        from pyspark.sql import functions as F
+
+        predictions = sample_paysim_data.withColumn(
+            "prediction",
+            F.when(F.col("nameDest") == "C553264065", 1.0).otherwise(0.0)
+        ).withColumn("fraud_probability", F.lit(0.95))
+
+        result = add_rule_based_alerts(
+            predictions,
+            blacklist_accounts=["C553264065"],
+        )
+        transfer_row = next(
+            row for row in result.collect()
+            if row["nameDest"] == "C553264065"
+        )
+
+        assert transfer_row["is_ml_alert"] == 1.0
+        assert transfer_row["is_rule_alert"] == 1.0
+        assert transfer_row["is_alert"] == 1.0
+        assert transfer_row["alert_source"] == "ML+BLACKLIST_RULE"
+
+    def test_blacklist_non_transfer_does_not_trigger_rule(self, spark):
+        """A blacklisted destination alone should not alert on non-transfer types."""
+        from streaming_pipeline import add_rule_based_alerts
+        from pyspark.sql import functions as F
+
+        data = [
+            (
+                1, "CASH_OUT", 9000.0, "C100", 9000.0, 0.0,
+                "C553264065", 0.0, 9000.0, 0, 0,
+            ),
+        ]
+        columns = [
+            "step", "type", "amount", "nameOrig",
+            "oldbalanceOrg", "newbalanceOrig",
+            "nameDest", "oldbalanceDest", "newbalanceDest",
+            "isFraud", "isFlaggedFraud",
+        ]
+
+        predictions = spark.createDataFrame(data, columns).withColumn(
+            "prediction", F.lit(0.0)
+        ).withColumn("fraud_probability", F.lit(0.02))
+
+        row = add_rule_based_alerts(
+            predictions,
+            blacklist_accounts=["C553264065"],
+        ).collect()[0]
+
+        assert row["is_blacklist_destination"] == 1.0
+        assert row["is_rule_alert"] == 0.0
+        assert row["is_alert"] == 0.0
+        assert row["alert_source"] == "NONE"

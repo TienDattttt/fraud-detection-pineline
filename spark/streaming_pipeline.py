@@ -35,6 +35,21 @@ KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "transactions")
 MODEL_PATH = os.getenv(
     "MODEL_PATH", "/opt/spark/work/models/fraud_pipeline_model"
 )
+BLACKLIST_PATH = os.getenv(
+    "BLACKLIST_PATH", "/opt/spark/work/data/blacklist_accounts.txt"
+)
+BLACKLIST_ACCOUNTS = tuple(
+    value.strip()
+    for value in os.getenv("BLACKLIST_ACCOUNTS", "").split(",")
+    if value.strip()
+)
+BLACKLIST_TRANSFER_TYPES = tuple(
+    value.strip().upper()
+    for value in os.getenv(
+        "BLACKLIST_TRANSFER_TYPES", "TRANSFER"
+    ).split(",")
+    if value.strip()
+)
 HDFS_OUTPUT = os.getenv(
     "HDFS_OUTPUT", "hdfs://namenode:8020/datalake/transactions"
 )
@@ -80,13 +95,99 @@ def get_redis_client():
         return None
 
 
-def process_batch(batch_df, batch_id, model, redis_client):
+def load_blacklist_accounts(
+    path=BLACKLIST_PATH,
+    inline_accounts=BLACKLIST_ACCOUNTS,
+):
+    """Load blacklisted destination accounts from env and/or file."""
+    accounts = {
+        account.strip()
+        for account in inline_accounts
+        if account and account.strip()
+    }
+
+    try:
+        with open(path, "r", encoding="utf-8") as file_obj:
+            for raw_line in file_obj:
+                account = raw_line.strip()
+                if account and not account.startswith("#"):
+                    accounts.add(account)
+    except FileNotFoundError:
+        if not accounts:
+            print(f"[WARN] Blacklist file not found: {path}")
+    except Exception as e:
+        print(f"[WARN] Failed to load blacklist file {path}: {e}")
+
+    loaded_accounts = sorted(accounts)
+    print(
+        f"[INFO] Loaded {len(loaded_accounts)} blacklisted accounts"
+    )
+    return loaded_accounts
+
+
+def add_rule_based_alerts(df, blacklist_accounts):
+    """Combine ML fraud prediction with a blacklist transfer rule."""
+    result = df
+    blacklist_values = tuple(blacklist_accounts)
+    transaction_type = F.upper(
+        F.coalesce(F.col("type"), F.lit(""))
+    )
+
+    is_ml_alert = F.when(F.col("prediction") == 1.0, 1.0).otherwise(0.0)
+    result = result.withColumn("is_ml_alert", is_ml_alert)
+
+    if blacklist_values:
+        is_blacklist_destination = F.when(
+            F.col("nameDest").isin(*blacklist_values), 1.0
+        ).otherwise(0.0)
+    else:
+        is_blacklist_destination = F.lit(0.0)
+
+    result = result.withColumn(
+        "is_blacklist_destination", is_blacklist_destination
+    )
+
+    if blacklist_values and BLACKLIST_TRANSFER_TYPES:
+        is_rule_alert = F.when(
+            (F.col("nameDest").isin(*blacklist_values))
+            & (transaction_type.isin(*BLACKLIST_TRANSFER_TYPES)),
+            1.0
+        ).otherwise(0.0)
+    else:
+        is_rule_alert = F.lit(0.0)
+
+    result = result.withColumn("is_rule_alert", is_rule_alert)
+    result = result.withColumn(
+        "is_alert",
+        F.when(
+            (F.col("is_ml_alert") == 1.0)
+            | (F.col("is_rule_alert") == 1.0),
+            1.0
+        ).otherwise(0.0)
+    )
+    result = result.withColumn(
+        "alert_source",
+        F.when(
+            (F.col("is_ml_alert") == 1.0)
+            & (F.col("is_rule_alert") == 1.0),
+            F.lit("ML+BLACKLIST_RULE")
+        )
+        .when(F.col("is_rule_alert") == 1.0, F.lit("BLACKLIST_RULE"))
+        .when(F.col("is_ml_alert") == 1.0, F.lit("ML_MODEL"))
+        .otherwise(F.lit("NONE"))
+    )
+
+    return result
+
+
+def process_batch(batch_df, batch_id, model, redis_client, blacklist_accounts):
     """
     Process each micro-batch:
     1. Apply feature engineering
     2. Run ML prediction
-    3. Write all results to HDFS (Parquet)
-    4. Publish fraud alerts to Redis
+    3. Apply rule-based alerts (blacklist)
+    4. Write all results to HDFS (Parquet)
+    5. Publish fraud alerts to Redis
     """
     if batch_df.isEmpty():
         return
@@ -116,6 +217,9 @@ def process_batch(batch_df, batch_id, model, redis_client):
     predictions_df = predictions_df.withColumn(
         "fraud_probability", extract_fraud_prob(F.col("probability"))
     )
+    predictions_df = add_rule_based_alerts(
+        predictions_df, blacklist_accounts
+    )
 
     # Add processing metadata
     predictions_df = (
@@ -135,7 +239,10 @@ def process_batch(batch_df, batch_id, model, redis_client):
         "step", "type", "amount", "nameOrig", "oldbalanceOrg",
         "newbalanceOrig", "nameDest", "oldbalanceDest", "newbalanceDest",
         "isFraud", "isFlaggedFraud",
-        "prediction", "fraud_probability", "processed_at",
+        "prediction", "fraud_probability",
+        "is_ml_alert", "is_blacklist_destination",
+        "is_rule_alert", "is_alert", "alert_source",
+        "processed_at",
         "dt", "hour",
     ]
 
@@ -150,26 +257,36 @@ def process_batch(batch_df, batch_id, model, redis_client):
     # ------------------------------------------------------------------
     # Step 4: Publish fraud alerts to Redis
     # ------------------------------------------------------------------
-    fraud_count = predictions_df.filter(F.col("prediction") == 1.0).count()
+    alert_count = predictions_df.filter(F.col("is_alert") == 1.0).count()
+    ml_alert_count = predictions_df.filter(
+        F.col("is_ml_alert") == 1.0
+    ).count()
+    rule_alert_count = predictions_df.filter(
+        F.col("is_rule_alert") == 1.0
+    ).count()
 
     if redis_client is not None:
         # Update atomic counters
         try:
             redis_client.incrby("total_transactions", row_count)
-            redis_client.incrby("total_fraud", fraud_count)
+            redis_client.incrby("total_fraud", alert_count)
+            redis_client.incrby("total_ml_alerts", ml_alert_count)
+            redis_client.incrby("total_rule_alerts", rule_alert_count)
         except Exception:
             pass
 
         # Publish individual fraud alerts
-        if fraud_count > 0:
+        if alert_count > 0:
             fraud_rows = (
                 predictions_df
-                .filter(F.col("prediction") == 1.0)
+                .filter(F.col("is_alert") == 1.0)
                 .select(
                     "step", "type", "amount",
                     "nameOrig", "nameDest",
                     "fraud_probability",
                     "oldbalanceOrg", "newbalanceOrig",
+                    "is_ml_alert", "is_blacklist_destination",
+                    "is_rule_alert", "alert_source",
                 )
                 .collect()
             )
@@ -186,6 +303,12 @@ def process_batch(batch_df, batch_id, model, redis_client):
                     ),
                     "oldbalanceOrg": row["oldbalanceOrg"],
                     "newbalanceOrig": row["newbalanceOrig"],
+                    "is_ml_alert": int(row["is_ml_alert"]),
+                    "is_blacklist_destination": int(
+                        row["is_blacklist_destination"]
+                    ),
+                    "is_rule_alert": int(row["is_rule_alert"]),
+                    "alert_source": row["alert_source"],
                 }
                 try:
                     redis_client.publish(
@@ -202,7 +325,9 @@ def process_batch(batch_df, batch_id, model, redis_client):
     print(
         f"[Batch {batch_id}] "
         f"Processed: {row_count} | "
-        f"Fraud detected: {fraud_count}"
+        f"Alerts: {alert_count} | "
+        f"ML: {ml_alert_count} | "
+        f"Rule: {rule_alert_count}"
     )
 
 
@@ -240,6 +365,7 @@ def main():
     # Connect to Redis
     # ------------------------------------------------------------------
     redis_client = get_redis_client()
+    blacklist_accounts = load_blacklist_accounts()
 
     # ------------------------------------------------------------------
     # Read from Kafka
@@ -278,12 +404,19 @@ def main():
     print("\n⏳ Starting streaming query...")
     print(f"   HDFS output: {HDFS_OUTPUT}")
     print(f"   Redis channel: {REDIS_CHANNEL}")
+    print(f"   Blacklist file: {BLACKLIST_PATH}")
+    print(
+        "   Blacklist rule types: "
+        + ", ".join(BLACKLIST_TRANSFER_TYPES)
+    )
     print("   Press Ctrl+C to stop.\n")
 
     query = (
         watermarked_stream.writeStream
         .foreachBatch(
-            lambda df, bid: process_batch(df, bid, model, redis_client)
+            lambda df, bid: process_batch(
+                df, bid, model, redis_client, blacklist_accounts
+            )
         )
         .option("checkpointLocation", HDFS_CHECKPOINT)
         .trigger(processingTime="10 seconds")

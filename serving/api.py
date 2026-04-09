@@ -84,6 +84,8 @@ class HealthResponse(BaseModel):
 class KPIResponse(BaseModel):
     total_transactions: int
     total_fraud: int
+    total_ml_alerts: int
+    total_rule_alerts: int
     fraud_rate: float
 
 
@@ -96,6 +98,10 @@ class AlertItem(BaseModel):
     fraud_probability: Optional[float] = None
     oldbalanceOrg: Optional[float] = None
     newbalanceOrig: Optional[float] = None
+    is_ml_alert: Optional[int] = None
+    is_blacklist_destination: Optional[int] = None
+    is_rule_alert: Optional[int] = None
+    alert_source: Optional[str] = None
 
 
 # ============================================================
@@ -123,9 +129,13 @@ async def get_kpis():
     """
     total_txn = await redis_pool.get("total_transactions")
     total_fraud = await redis_pool.get("total_fraud")
+    total_ml_alerts = await redis_pool.get("total_ml_alerts")
+    total_rule_alerts = await redis_pool.get("total_rule_alerts")
 
     total_txn = int(total_txn) if total_txn else 0
     total_fraud = int(total_fraud) if total_fraud else 0
+    total_ml_alerts = int(total_ml_alerts) if total_ml_alerts else 0
+    total_rule_alerts = int(total_rule_alerts) if total_rule_alerts else 0
     fraud_rate = (
         (total_fraud / total_txn * 100) if total_txn > 0 else 0.0
     )
@@ -133,6 +143,8 @@ async def get_kpis():
     return KPIResponse(
         total_transactions=total_txn,
         total_fraud=total_fraud,
+        total_ml_alerts=total_ml_alerts,
+        total_rule_alerts=total_rule_alerts,
         fraud_rate=round(fraud_rate, 4),
     )
 
