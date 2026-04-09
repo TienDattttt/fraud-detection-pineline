@@ -8,6 +8,9 @@ RUN pip install --no-cache-dir \
     redis==5.0.0 \
     pyspark==3.5.3 \
     mlflow==2.12.0 \
-    numpy==1.26.4
+    numpy==1.24.4
+
+RUN mkdir -p /home/spark/.ivy2/cache /home/spark/.ivy2/jars \
+    && chown -R spark:spark /home/spark/.ivy2
 
 USER spark

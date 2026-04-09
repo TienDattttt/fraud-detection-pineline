@@ -87,6 +87,7 @@ services:
       --ip 0.0.0.0 --port 7077 --webui-port 8080
     volumes:
       - ./spark:/opt/spark/work/spark
+      - ./producer:/opt/spark/work/producer
       - ./models:/opt/spark/work/models
       - ./data:/opt/spark/work/data
     healthcheck:
@@ -113,6 +114,7 @@ services:
       spark://spark-master:7077
     volumes:
       - ./spark:/opt/spark/work/spark
+      - ./producer:/opt/spark/work/producer
       - ./models:/opt/spark/work/models
       - ./data:/opt/spark/work/data
     networks:
