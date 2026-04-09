@@ -1,6 +1,7 @@
 # Data
 data/*.csv
 data/*.zip
+.full_report.md
 
 # Models
 models/fraud_pipeline_model/
