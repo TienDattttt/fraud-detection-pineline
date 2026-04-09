@@ -135,8 +135,10 @@ def prepare_dataframe(df: DataFrame) -> DataFrame:
         .withColumn("oldbalanceDest", F.col("oldbalanceDest").cast("double"))
         .withColumn("newbalanceDest", F.col("newbalanceDest").cast("double"))
         .withColumn("isFraud", F.col("isFraud").cast("double"))
-        .withColumn("isFlaggedFraud",
-                     F.col("isFlaggedFraud").cast("integer"))
+        .withColumn(
+            "isFlaggedFraud",
+            F.col("isFlaggedFraud").cast("integer")
+        )
     )
 
     # Add engineered features
