@@ -17,13 +17,6 @@
 │                                                          FastAPI ◄────┘         │
 │                                                     /kpis /alerts /stream       │
 └─────────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                           Upload Parquet files
-                                      ▼
-┌──────────────────── DATABRICKS COMMUNITY (Free) ────────────────────────────────┐
-│  Bronze (Raw Parquet → Delta) → Silver (Feature Eng + ML) → Gold (KPI Agg)     │
-│  MLflow tracking ─► Export best model → download to local /models/              │
-└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ##  Yêu cầu
@@ -82,6 +75,7 @@ docker exec spark-master python3 /opt/spark/work/producer/kafka_producer.py --sp
 - Real-time SSE: http://localhost:8000/stream/alerts
 - HDFS UI: http://localhost:9870
 - Spark UI: http://localhost:8081
+- Frontend can consume these APIs from a separate Next.js/Vercel repo
 
 ## Blacklist Rule
 
@@ -128,14 +122,10 @@ fraud-detection-pipeline/
 │   ├── redis_listener.py       # Async Redis subscriber → SSE fan-out
 │   ├── Dockerfile
 │   └── requirements.txt
-├── databricks/
-│   ├── 01_bronze_ingestion.py  # Raw Parquet → Delta Bronze
-│   ├── 02_silver_ml.py         # Feature eng + ML predict → Silver
-│   └── 03_gold_aggregation.py  # 5 KPI tables → Gold
 ├── tests/
 │   ├── conftest.py             # SparkSession fixtures
 │   ├── test_preprocessing.py   # 14 unit tests cho feature engineering
-│   └── test_api.py             # 9 integration tests cho API endpoints
+│   └── test_api.py             # 8 integration tests cho API endpoints
 ├── scripts/
 │   ├── start_pipeline.sh       # One-command startup
 │   ├── start_pipeline.ps1      # Windows PowerShell startup
@@ -192,12 +182,11 @@ pytest tests/test_api.py -v
 |-------|-----------|
 | Message Queue | Apache Kafka 3.7 (KRaft mode) |
 | Stream Processing | Apache Spark 3.5.3 Structured Streaming |
-| Storage | HDFS (Parquet) + Delta Lake (Databricks) |
+| Storage | HDFS (Parquet) |
 | ML | PySpark MLlib + MLflow |
 | Serving | FastAPI + Redis Pub/Sub + SSE |
 | Infrastructure | Docker Compose |
 | CI/CD | GitHub Actions |
-| Cloud Analytics | Databricks Community Edition |
 
 ##  Nhóm thực hiện
 
