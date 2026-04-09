@@ -63,6 +63,11 @@ MODEL_OUTPUT_CC_ALT = os.getenv(
 MLFLOW_TRACKING_URI = os.getenv(
     "MLFLOW_TRACKING_URI", "file:///opt/spark/work/models/mlruns"
 )
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_MODEL_METRICS_KEY = os.getenv(
+    "REDIS_MODEL_METRICS_KEY", "model_metrics"
+)
 
 # CreditCard PCA feature columns
 CC_PCA_COLS = [f"V{i}" for i in range(1, 29)]
@@ -158,6 +163,37 @@ def log_to_mlflow(run_name, metrics, params):
         print(f"📝 MLflow logged: {run_name}")
     except Exception as e:
         print(f"⚠️ MLflow logging skipped for {run_name}: {e}")
+
+
+def cache_model_metrics(metrics):
+    """
+    Cache deployed model metrics in Redis for the serving API.
+
+    Only numeric fields are stored because the API exposes this hash
+    as a float-only JSON object.
+    """
+    try:
+        import redis
+
+        client = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            decode_responses=True,
+            socket_timeout=5,
+        )
+        payload = {
+            key: f"{float(value):.6f}"
+            for key, value in metrics.items()
+        }
+        client.delete(REDIS_MODEL_METRICS_KEY)
+        client.hset(REDIS_MODEL_METRICS_KEY, mapping=payload)
+        client.close()
+        print(
+            "[OK] Cached deployed model metrics in Redis "
+            f"hash '{REDIS_MODEL_METRICS_KEY}'"
+        )
+    except Exception as e:
+        print(f"[WARN] Redis metrics cache skipped: {e}")
 
 
 # ============================================================
@@ -540,6 +576,10 @@ def save_models(paysim_results, cc_results):
     )
     ps_best_model.write().overwrite().save(MODEL_OUTPUT_PAYSIM)
     print("   ✅ Saved")
+    cache_model_metrics({
+        **paysim_results[ps_best_name.lower()]["metrics"],
+        "training_time_seconds": paysim_results[ps_best_name.lower()]["time"],
+    })
 
     print(
         f"   PaySim alt  ({ps_alt_name}) → {MODEL_OUTPUT_PAYSIM_ALT}"

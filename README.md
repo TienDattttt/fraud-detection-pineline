@@ -53,6 +53,11 @@ chmod +x scripts/start_pipeline.sh
 ./scripts/start_pipeline.sh
 ```
 
+Windows PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_pipeline.ps1
+```
+
 ### 4. Train model (lần đầu)
 ```bash
 docker exec spark-master spark-submit /opt/spark/work/spark/train_model.py
@@ -107,7 +112,9 @@ fraud-detection-pipeline/
 │   └── test_api.py             # 9 integration tests cho API endpoints
 ├── scripts/
 │   ├── start_pipeline.sh       # One-command startup
+│   ├── start_pipeline.ps1      # Windows PowerShell startup
 │   ├── stop_pipeline.sh        # Graceful shutdown
+│   ├── stop_pipeline.ps1       # Windows PowerShell shutdown
 │   └── download_dataset.py     # PaySim dataset downloader
 ├── data/                       # PaySim CSV (gitignored)
 ├── models/                     # Trained PipelineModel (gitignored)
