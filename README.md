@@ -192,7 +192,7 @@ pytest tests/test_api.py -v
 
 | Thành viên | Vai trò |
 |------------|---------|
-| Tao | Infrastructure & Kafka Producer |
-| Tao | ML Pipeline & Spark Streaming |
-| Tao | Backend Serving (FastAPI + Redis) |
-| Cũng là tao | Frontend Dashboard (Next.js) |
+|  | Infrastructure & Kafka Producer |
+|  | ML Pipeline & Spark Streaming |
+|  | Backend Serving (FastAPI + Redis) |
+|  | Frontend Dashboard (Next.js) |
