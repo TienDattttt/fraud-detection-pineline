@@ -195,13 +195,16 @@ def cache_model_metrics(validation_metrics, test_metrics, training_time):
         print(f"[WARN] Redis metrics cache skipped: {exc}")
 
 
-def load_paysim_dataset(spark, csv_path=PAYSIM_CSV):
+def load_paysim_dataset(spark, csv_path=None):
     """
     Load, clean, and enrich the PaySim dataset for model training.
 
     Returns the weighted training DataFrame plus a small summary dict that is
     convenient for notebooks and reporting.
     """
+    if csv_path is None:
+        csv_path = PAYSIM_CSV
+
     print("\n" + "=" * 60)
     print("PaySim dataset loading and preprocessing")
     print("=" * 60)
@@ -283,14 +286,17 @@ def train_candidate_model(
     }
 
 
-def train_paysim(spark):
+def train_paysim(spark, csv_path=None):
     """
     Train candidate PaySim models and return a structured result bundle.
 
     The best model is chosen by validation AUC, while test metrics are kept
     separate for reporting.
     """
-    weighted_df, data_summary = load_paysim_dataset(spark)
+    weighted_df, data_summary = load_paysim_dataset(
+        spark,
+        csv_path=csv_path,
+    )
     train_df, validation_df, test_df = split_dataset(weighted_df)
     feature_pipeline = create_feature_pipeline()
 
