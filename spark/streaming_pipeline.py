@@ -24,7 +24,10 @@ import redis
 
 # Add parent dir to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from preprocessing import add_engineered_features  # noqa: E402
+from preprocessing import (  # noqa: E402
+    add_engineered_features,
+    clean_paysim_dataframe,
+)
 
 
 # ============================================================
@@ -192,13 +195,23 @@ def process_batch(batch_df, batch_id, model, redis_client, blacklist_accounts):
     if batch_df.isEmpty():
         return
 
-    row_count = batch_df.count()
+    raw_count = batch_df.count()
 
     # ------------------------------------------------------------------
     # Step 1: Feature engineering
     # ------------------------------------------------------------------
-    # Cast isFraud to double for consistency with training label
-    featured_df = batch_df.withColumn(
+    cleaned_df = clean_paysim_dataframe(batch_df)
+    row_count = cleaned_df.count()
+    dropped_count = raw_count - row_count
+
+    if row_count == 0:
+        print(
+            f"[Batch {batch_id}] "
+            f"Skipped: all {raw_count} rows dropped during cleaning"
+        )
+        return
+
+    featured_df = cleaned_df.withColumn(
         "label", F.col("isFraud").cast("double")
     )
     featured_df = add_engineered_features(featured_df)
@@ -324,7 +337,9 @@ def process_batch(batch_df, batch_id, model, redis_client, blacklist_accounts):
 
     print(
         f"[Batch {batch_id}] "
+        f"Raw: {raw_count} | "
         f"Processed: {row_count} | "
+        f"Dropped: {dropped_count} | "
         f"Alerts: {alert_count} | "
         f"ML: {ml_alert_count} | "
         f"Rule: {rule_alert_count}"

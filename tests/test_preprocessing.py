@@ -7,6 +7,68 @@ All tests use PySpark local mode — no cluster needed.
 import pytest
 
 
+class TestCleanPaySimDataframe:
+    """Test raw PaySim cleaning and normalization rules."""
+
+    def test_trim_and_normalize_strings(self, spark):
+        """type and account identifiers should be trimmed and uppercased."""
+        from preprocessing import clean_paysim_dataframe
+
+        rows = [
+            (
+                1, " transfer ", 100.0, " c123 ", 500.0, 400.0,
+                " c999 ", 0.0, 100.0, 0, None,
+            ),
+        ]
+        columns = [
+            "step", "type", "amount", "nameOrig",
+            "oldbalanceOrg", "newbalanceOrig",
+            "nameDest", "oldbalanceDest", "newbalanceDest",
+            "isFraud", "isFlaggedFraud",
+        ]
+
+        row = clean_paysim_dataframe(
+            spark.createDataFrame(rows, columns)
+        ).collect()[0]
+
+        assert row["type"] == "TRANSFER"
+        assert row["nameOrig"] == "C123"
+        assert row["nameDest"] == "C999"
+        assert row["isFlaggedFraud"] == 0
+
+    def test_drop_invalid_type_and_blank_destination(self, spark):
+        """Rows with unsupported transaction types or blank IDs are dropped."""
+        from preprocessing import clean_paysim_dataframe
+
+        rows = [
+            (
+                1, "PAYMENT", 100.0, "C1", 500.0, 400.0,
+                "M1", 0.0, 100.0, 0, 0,
+            ),
+            (
+                2, "UNKNOWN", 50.0, "C2", 500.0, 450.0,
+                "M2", 0.0, 50.0, 0, 0,
+            ),
+            (
+                3, "TRANSFER", 50.0, "C3", 500.0, 450.0,
+                " ", 0.0, 50.0, 0, 0,
+            ),
+        ]
+        columns = [
+            "step", "type", "amount", "nameOrig",
+            "oldbalanceOrg", "newbalanceOrig",
+            "nameDest", "oldbalanceDest", "newbalanceDest",
+            "isFraud", "isFlaggedFraud",
+        ]
+
+        cleaned = clean_paysim_dataframe(
+            spark.createDataFrame(rows, columns)
+        )
+
+        assert cleaned.count() == 1
+        assert cleaned.collect()[0]["type"] == "PAYMENT"
+
+
 class TestAddEngineeredFeatures:
     """Test add_engineered_features() function."""
 

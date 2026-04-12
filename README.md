@@ -1,8 +1,7 @@
-# 🛡️ Real-time Fraud Detection Pipeline
+# Real-time Fraud Detection Pipeline
 
-> **Đồ án cuối kỳ Big Data** — Quản trị rủi ro & Phát hiện gian lận theo thời gian thực cho ví điện tử
 
-## 🏗 Kiến trúc hệ thống
+## Kiến trúc hệ thống
 
 ```
 ┌──────────────────────────── LOCAL (Docker Compose) ─────────────────────────────┐
