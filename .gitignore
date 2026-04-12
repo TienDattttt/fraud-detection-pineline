@@ -16,6 +16,7 @@ venv/
 # IDE
 .vscode/
 .idea/
+.ipynb_checkpoints/
 
 # Docker volumes
 namenode_data/

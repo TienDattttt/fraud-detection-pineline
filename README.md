@@ -55,6 +55,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start_pipeline.ps1
 docker exec spark-master spark-submit /opt/spark/work/spark/train_model.py
 ```
 
+Notebook for EDA + preprocessing + training walkthrough:
+```text
+notebooks/01_paysim_eda_preprocessing_training.ipynb
+```
+
 ### 5. Chạy Streaming Pipeline
 ```bash
 docker exec spark-master spark-submit \
@@ -97,10 +102,12 @@ BLACKLIST_TRANSFER_TYPES=TRANSFER
 
 - `PaySim` is the primary dataset for the real-time pipeline:
   producer -> Kafka -> Spark Structured Streaming -> Redis/HDFS
-- `creditcard.csv` is a secondary reference dataset for offline
-  benchmarking and model comparison only
+- `creditcard.csv` is kept only as an optional reference dataset
+  outside the main automated pipeline
 - The live streaming demo, blacklist rule, and alert APIs are all built
   around the PaySim transaction schema
+- The notebook layer explains the pipeline, but the `.py` files under
+  `spark/` remain the source of truth for production-like execution
 
 ##  Cấu trúc project
 
@@ -112,10 +119,13 @@ fraud-detection-pipeline/
 │   ├── kafka_producer.py       # Đọc PaySim CSV → Kafka topic
 │   └── requirements.txt
 ├── spark/
-│   ├── preprocessing.py        # Feature engineering (PySpark ONLY, NO Pandas)
-│   ├── train_model.py          # RF vs GBT training + CrossValidator + MLflow
+│   ├── preprocessing.py        # PaySim cleaning + feature engineering
+│   ├── train_model.py          # PaySim RF vs GBT training + validation/test metrics
 │   ├── streaming_pipeline.py   # Kafka → ML predict → HDFS + Redis
 │   └── requirements.txt
+├── notebooks/
+│   └── 01_paysim_eda_preprocessing_training.ipynb
+│                              # EDA + preprocessing + training walkthrough
 ├── serving/
 │   ├── api.py                  # FastAPI: /kpis, /alerts, /stream (SSE)
 │   ├── redis_listener.py       # Async Redis subscriber → SSE fan-out
@@ -123,7 +133,7 @@ fraud-detection-pipeline/
 │   └── requirements.txt
 ├── tests/
 │   ├── conftest.py             # SparkSession fixtures
-│   ├── test_preprocessing.py   # 14 unit tests cho feature engineering
+│   ├── test_preprocessing.py   # 16 tests cho cleaning + features + blacklist rules
 │   └── test_api.py             # 8 integration tests cho API endpoints
 ├── scripts/
 │   ├── start_pipeline.sh       # One-command startup
@@ -149,9 +159,10 @@ fraud-detection-pipeline/
 | `type_index` | Loại GD encoded (StringIndexer) |
 
 ### Models so sánh
-- **Random Forest** (numTrees=100, maxDepth=10) + CrossValidator 3-fold
-- **Gradient Boosted Trees** (maxIter=50, maxDepth=8)
-- Chọn model tốt hơn dựa trên AUC-ROC
+- **Random Forest**
+- **Gradient Boosted Trees**
+- Chọn model tốt hơn dựa trên validation AUC
+- Báo cáo đầy đủ accuracy, precision, recall, F1, AUC trên validation và test
 - Giải quyết imbalanced data bằng `weightCol`
 
 ##  API Endpoints

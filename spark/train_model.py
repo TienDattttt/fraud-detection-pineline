@@ -14,6 +14,7 @@ Usage (inside spark-master container):
 import os
 import sys
 import time
+from pathlib import Path
 
 from pyspark.ml import Pipeline
 from pyspark.ml.classification import (
@@ -35,17 +36,21 @@ from preprocessing import (  # noqa: E402
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONTAINER_ROOT = Path("/opt/spark/work")
+RUNTIME_ROOT = CONTAINER_ROOT if CONTAINER_ROOT.exists() else PROJECT_ROOT
+
 PAYSIM_CSV = os.getenv(
-    "PAYSIM_CSV", "/opt/spark/work/data/paysim_transactions.csv"
+    "PAYSIM_CSV", str(RUNTIME_ROOT / "data" / "paysim_transactions.csv")
 )
 MODEL_OUTPUT = os.getenv(
-    "MODEL_PATH", "/opt/spark/work/models/fraud_pipeline_model"
+    "MODEL_PATH", str(RUNTIME_ROOT / "models" / "fraud_pipeline_model")
 )
 MODEL_OUTPUT_ALT = os.getenv(
-    "MODEL_PATH_ALT", "/opt/spark/work/models/fraud_pipeline_model_alt"
+    "MODEL_PATH_ALT", str(RUNTIME_ROOT / "models" / "fraud_pipeline_model_alt")
 )
 MLFLOW_TRACKING_URI = os.getenv(
-    "MLFLOW_TRACKING_URI", "file:///opt/spark/work/models/mlruns"
+    "MLFLOW_TRACKING_URI", (RUNTIME_ROOT / "models" / "mlruns").resolve().as_uri()
 )
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))

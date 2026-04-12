@@ -183,6 +183,7 @@ class TestCreateFeaturePipeline:
 
     def test_pipeline_stages(self):
         """Pipeline should have 3 stages: StringIndexer, VectorAssembler, StandardScaler."""
+        pytest.importorskip("pyspark")
         from preprocessing import create_feature_pipeline
 
         pipeline = create_feature_pipeline()
