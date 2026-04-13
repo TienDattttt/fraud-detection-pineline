@@ -77,6 +77,7 @@ docker exec spark-master python3 /opt/spark/work/producer/kafka_producer.py --sp
 - KPIs: http://localhost:8000/kpis
 - Alerts: http://localhost:8000/recent-alerts
 - Real-time SSE: http://localhost:8000/stream/alerts
+- Kafka UI: http://localhost:8082
 - HDFS UI: http://localhost:9870
 - Spark UI: http://localhost:8081
 - Frontend can consume these APIs from a separate Next.js/Vercel repo
@@ -113,7 +114,7 @@ BLACKLIST_TRANSFER_TYPES=TRANSFER
 
 ```
 fraud-detection-pipeline/
-├── docker-compose.yml          # 7 services: Kafka, HDFS, Spark, Redis, FastAPI
+├── docker-compose.yml          # 8 services: Kafka, Kafka UI, HDFS, Spark, Redis, FastAPI
 ├── Dockerfile                  # Custom Spark image with ML libs
 ├── producer/
 │   ├── kafka_producer.py       # Đọc PaySim CSV → Kafka topic

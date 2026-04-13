@@ -25,6 +25,8 @@ from pyspark.ml.evaluation import (
     BinaryClassificationEvaluator,
     MulticlassClassificationEvaluator,
 )
+from pyspark.ml.functions import vector_to_array
+from pyspark.mllib.evaluation import BinaryClassificationMetrics
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
@@ -61,6 +63,18 @@ TRAIN_SPLIT = 0.7
 VALIDATION_SPLIT = 0.15
 TEST_SPLIT = 0.15
 RANDOM_SEED = 42
+MAX_ROC_POINTS = 200
+
+MODEL_PROFILES = {
+    "full": {
+        "rf": {"numTrees": 80, "maxDepth": 10},
+        "gbt": {"maxIter": 30, "maxDepth": 8},
+    },
+    "notebook": {
+        "rf": {"numTrees": 40, "maxDepth": 8},
+        "gbt": {"maxIter": 15, "maxDepth": 6},
+    },
+}
 
 
 def add_class_weights(df):
@@ -127,6 +141,56 @@ def evaluate_model(predictions):
         name: evaluator.evaluate(predictions)
         for name, evaluator in evaluators.items()
     }
+
+
+def collect_confusion_matrix(predictions):
+    """Collect a small 2x2 confusion matrix from Spark predictions."""
+    counts = {
+        (int(row["label"]), int(row["prediction"])): int(row["count"])
+        for row in (
+            predictions
+            .groupBy("label", "prediction")
+            .count()
+            .collect()
+        )
+    }
+
+    return {
+        "tn": counts.get((0, 0), 0),
+        "fp": counts.get((0, 1), 0),
+        "fn": counts.get((1, 0), 0),
+        "tp": counts.get((1, 1), 0),
+    }
+
+
+def collect_roc_curve(predictions, max_points=MAX_ROC_POINTS):
+    """
+    Collect ROC curve points from distributed Spark predictions.
+
+    The resulting list is down-sampled so notebooks can plot it cheaply.
+    """
+    scored_df = predictions.select(
+        vector_to_array("probability")[1].alias("score"),
+        F.col("label").cast("double").alias("label"),
+    )
+    score_and_labels = scored_df.rdd.map(
+        lambda row: (float(row["score"]), float(row["label"]))
+    )
+    metrics = BinaryClassificationMetrics(score_and_labels)
+    roc_points = [
+        {"fpr": float(point[0]), "tpr": float(point[1])}
+        for point in metrics.roc().collect()
+    ]
+
+    if len(roc_points) <= max_points:
+        return roc_points
+
+    step = max(1, len(roc_points) // (max_points - 1))
+    sampled_points = roc_points[::step]
+    if sampled_points[-1] != roc_points[-1]:
+        sampled_points.append(roc_points[-1])
+
+    return sampled_points
 
 
 def print_metric_block(title, metrics):
@@ -252,6 +316,57 @@ def split_dataset(df, seed=RANDOM_SEED):
     return train_df, validation_df, test_df
 
 
+def sample_split(df, sample_fraction, seed):
+    """Stratified sampling for interactive notebook training."""
+    if sample_fraction is None:
+        return df
+    if not 0 < sample_fraction <= 1:
+        raise ValueError("sample_fraction must be in the interval (0, 1].")
+    if sample_fraction == 1:
+        return df
+
+    return df.sampleBy(
+        "label",
+        fractions={0.0: sample_fraction, 1.0: sample_fraction},
+        seed=seed,
+    )
+
+
+def get_candidate_estimators(model_profile):
+    """Build candidate estimators for the requested training profile."""
+    if model_profile not in MODEL_PROFILES:
+        raise ValueError(
+            f"Unknown model_profile '{model_profile}'. "
+            f"Expected one of: {', '.join(sorted(MODEL_PROFILES))}"
+        )
+
+    profile = MODEL_PROFILES[model_profile]
+    return {
+        "rf": (
+            "RandomForest",
+            RandomForestClassifier(
+                featuresCol="features",
+                labelCol="label",
+                weightCol="weight",
+                numTrees=profile["rf"]["numTrees"],
+                maxDepth=profile["rf"]["maxDepth"],
+                seed=RANDOM_SEED,
+            ),
+        ),
+        "gbt": (
+            "GradientBoostedTrees",
+            GBTClassifier(
+                featuresCol="features",
+                labelCol="label",
+                weightCol="weight",
+                maxIter=profile["gbt"]["maxIter"],
+                maxDepth=profile["gbt"]["maxDepth"],
+                seed=RANDOM_SEED,
+            ),
+        ),
+    }
+
+
 def train_candidate_model(
     model_name,
     estimator,
@@ -259,6 +374,7 @@ def train_candidate_model(
     validation_df,
     test_df,
     feature_pipeline,
+    include_model=True,
 ):
     """Fit one candidate model and evaluate it on validation and test splits."""
     print(f"\nTraining {model_name}...")
@@ -268,25 +384,41 @@ def train_candidate_model(
     fitted_model = pipeline.fit(train_df)
     training_time = time.time() - started_at
 
-    validation_predictions = fitted_model.transform(validation_df)
-    test_predictions = fitted_model.transform(test_df)
+    validation_predictions = fitted_model.transform(validation_df).cache()
+    test_predictions = fitted_model.transform(test_df).cache()
     validation_metrics = evaluate_model(validation_predictions)
     test_metrics = evaluate_model(test_predictions)
+    test_confusion_matrix = collect_confusion_matrix(test_predictions)
+    test_roc_curve = collect_roc_curve(test_predictions)
 
     print(f"  Training time: {training_time:.1f}s")
     print_metric_block(f"{model_name} validation metrics", validation_metrics)
     print_metric_block(f"{model_name} test metrics", test_metrics)
 
-    return {
+    validation_predictions.unpersist()
+    test_predictions.unpersist()
+
+    result = {
         "name": model_name,
-        "model": fitted_model,
         "training_time_seconds": training_time,
         "validation_metrics": validation_metrics,
         "test_metrics": test_metrics,
+        "test_confusion_matrix": test_confusion_matrix,
+        "test_roc_curve": test_roc_curve,
     }
+    if include_model:
+        result["model"] = fitted_model
+
+    return result
 
 
-def train_paysim(spark, csv_path=None):
+def train_paysim(
+    spark,
+    csv_path=None,
+    model_profile="full",
+    include_models=True,
+    sample_fraction=None,
+):
     """
     Train candidate PaySim models and return a structured result bundle.
 
@@ -298,40 +430,45 @@ def train_paysim(spark, csv_path=None):
         csv_path=csv_path,
     )
     train_df, validation_df, test_df = split_dataset(weighted_df)
+
+    if sample_fraction is not None:
+        print(
+            "\nInteractive sampling enabled "
+            f"(fraction={sample_fraction:.2f} per label)"
+        )
+        train_df = sample_split(train_df, sample_fraction, RANDOM_SEED)
+        validation_df = sample_split(
+            validation_df, sample_fraction, RANDOM_SEED + 1
+        )
+        test_df = sample_split(test_df, sample_fraction, RANDOM_SEED + 2)
+
+        print("Sampled split summary:")
+        print(f"  Train:      {train_df.count():,}")
+        print(f"  Validation: {validation_df.count():,}")
+        print(f"  Test:       {test_df.count():,}")
+
     feature_pipeline = create_feature_pipeline()
 
-    candidates = {
-        "rf": train_candidate_model(
-            model_name="RandomForest",
-            estimator=RandomForestClassifier(
-                featuresCol="features",
-                labelCol="label",
-                weightCol="weight",
-                numTrees=80,
-                maxDepth=10,
-                seed=RANDOM_SEED,
-            ),
+    print(f"\nModel profile: {model_profile}")
+    candidates = {}
+    candidate_estimators = get_candidate_estimators(model_profile)
+
+    for model_key, (model_name, estimator) in candidate_estimators.items():
+        candidates[model_key] = train_candidate_model(
+            model_name=model_name,
+            estimator=estimator,
             train_df=train_df,
             validation_df=validation_df,
             test_df=test_df,
             feature_pipeline=feature_pipeline,
-        ),
-        "gbt": train_candidate_model(
-            model_name="GradientBoostedTrees",
-            estimator=GBTClassifier(
-                featuresCol="features",
-                labelCol="label",
-                weightCol="weight",
-                maxIter=30,
-                maxDepth=8,
-                seed=RANDOM_SEED,
-            ),
-            train_df=train_df,
-            validation_df=validation_df,
-            test_df=test_df,
-            feature_pipeline=feature_pipeline,
-        ),
-    }
+            include_model=include_models,
+        )
+
+        if not include_models:
+            try:
+                spark._jvm.java.lang.System.gc()
+            except Exception:
+                pass
 
     for model_key, result in candidates.items():
         log_to_mlflow(
@@ -341,6 +478,10 @@ def train_paysim(spark, csv_path=None):
             params={
                 "dataset": "paysim",
                 "model_key": model_key,
+                "model_profile": model_profile,
+                "sample_fraction": (
+                    1.0 if sample_fraction is None else sample_fraction
+                ),
                 "train_fraction": TRAIN_SPLIT,
                 "validation_fraction": VALIDATION_SPLIT,
                 "test_fraction": TEST_SPLIT,
@@ -349,6 +490,8 @@ def train_paysim(spark, csv_path=None):
 
     return {
         "data_summary": data_summary,
+        "model_profile": model_profile,
+        "sample_fraction": sample_fraction,
         "candidates": candidates,
     }
 
@@ -374,8 +517,14 @@ def results_to_rows(training_results):
         rows.append({
             "model_key": model_key,
             "model_name": result["name"],
+            "validation_accuracy": result["validation_metrics"]["accuracy"],
+            "validation_precision": result["validation_metrics"]["precision"],
+            "validation_recall": result["validation_metrics"]["recall"],
             "validation_auc": result["validation_metrics"]["auc"],
             "validation_f1": result["validation_metrics"]["f1"],
+            "test_accuracy": result["test_metrics"]["accuracy"],
+            "test_precision": result["test_metrics"]["precision"],
+            "test_recall": result["test_metrics"]["recall"],
             "test_auc": result["test_metrics"]["auc"],
             "test_f1": result["test_metrics"]["f1"],
             "training_time_seconds": result["training_time_seconds"],
@@ -428,6 +577,12 @@ def save_models(training_results):
     best_key, alt_key = select_best_model(training_results)
     best_result = training_results["candidates"][best_key]
     alt_result = training_results["candidates"][alt_key]
+
+    if "model" not in best_result or "model" not in alt_result:
+        raise ValueError(
+            "Model artifacts are not present in training_results. "
+            "Run train_paysim(..., include_models=True) before save_models()."
+        )
 
     print("\n" + "=" * 60)
     print("Saving models")
