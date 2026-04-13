@@ -5,6 +5,7 @@ data/*.zip
 
 # Models
 models/fraud_pipeline_model/
+models/fraud_pipeline_model_alt/
 
 # Python
 __pycache__/
@@ -28,6 +29,7 @@ Thumbs.db
 
 # Spark
 spark-warehouse/
+.spark-test/
 metastore_db/
 derby.log
 

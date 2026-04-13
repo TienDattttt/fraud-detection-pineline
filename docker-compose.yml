@@ -91,15 +91,18 @@ services:
       dockerfile: Dockerfile
     image: fraud-spark:3.5.3
     container_name: spark-master
+    working_dir: /tmp
     ports:
       - "8081:8080"
       - "7077:7077"
     environment:
       - SPARK_MODE=master
+      - SPARK_LOCAL_DIRS=/tmp/spark-local
     command: >
       /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
       --ip 0.0.0.0 --port 7077 --webui-port 8080
     volumes:
+      - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
       - ./spark:/opt/spark/work/spark
       - ./producer:/opt/spark/work/producer
       - ./models:/opt/spark/work/models
@@ -116,6 +119,7 @@ services:
   spark-worker:
     image: fraud-spark:3.5.3
     container_name: spark-worker
+    working_dir: /tmp
     depends_on:
       spark-master:
         condition: service_healthy
@@ -123,10 +127,13 @@ services:
       - SPARK_MASTER=spark://spark-master:7077
       - SPARK_WORKER_CORES=2
       - SPARK_WORKER_MEMORY=2G
+      - SPARK_LOCAL_DIRS=/tmp/spark-local
+      - SPARK_WORKER_DIR=/tmp/spark-work
     command: >
       /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
       spark://spark-master:7077
     volumes:
+      - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
       - ./spark:/opt/spark/work/spark
       - ./producer:/opt/spark/work/producer
       - ./models:/opt/spark/work/models

@@ -50,7 +50,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SPARK_LOCAL_IP: 127.0.0.1
+      SPARK_LOCAL_HOSTNAME: localhost
       PYSPARK_PYTHON: python
+      PYSPARK_DRIVER_PYTHON: python
     steps:
       - uses: actions/checkout@v4
 

@@ -26,7 +26,6 @@ from pyspark.ml.evaluation import (
     MulticlassClassificationEvaluator,
 )
 from pyspark.ml.functions import vector_to_array
-from pyspark.mllib.evaluation import BinaryClassificationMetrics
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
@@ -64,6 +63,7 @@ VALIDATION_SPLIT = 0.15
 TEST_SPLIT = 0.15
 RANDOM_SEED = 42
 MAX_ROC_POINTS = 200
+MAX_ROC_ROWS = 5000
 
 MODEL_PROFILES = {
     "full": {
@@ -163,24 +163,69 @@ def collect_confusion_matrix(predictions):
     }
 
 
-def collect_roc_curve(predictions, max_points=MAX_ROC_POINTS):
+def collect_roc_curve(
+    predictions,
+    max_points=MAX_ROC_POINTS,
+    max_rows=MAX_ROC_ROWS,
+):
     """
-    Collect ROC curve points from distributed Spark predictions.
+    Collect a lightweight ROC curve approximation from Spark predictions.
 
-    The resulting list is down-sampled so notebooks can plot it cheaply.
+    Spark's legacy BinaryClassificationMetrics ROC helper is not reliable
+    across current PySpark runtimes, so we collect a bounded stratified sample
+    of scores and build the curve in Python.
     """
     scored_df = predictions.select(
         vector_to_array("probability")[1].alias("score"),
         F.col("label").cast("double").alias("label"),
     )
-    score_and_labels = scored_df.rdd.map(
-        lambda row: (float(row["score"]), float(row["label"]))
+    label_counts = {
+        float(row["label"]): int(row["count"])
+        for row in scored_df.groupBy("label").count().collect()
+    }
+    fractions = {
+        label: min(1.0, max_rows / max(count, 1))
+        for label, count in label_counts.items()
+    }
+    sampled_rows = (
+        scored_df
+        .sampleBy("label", fractions=fractions, seed=RANDOM_SEED)
+        .limit(max_rows)
+        .collect()
     )
-    metrics = BinaryClassificationMetrics(score_and_labels)
-    roc_points = [
-        {"fpr": float(point[0]), "tpr": float(point[1])}
-        for point in metrics.roc().collect()
-    ]
+    if not sampled_rows:
+        return [{"fpr": 0.0, "tpr": 0.0}, {"fpr": 1.0, "tpr": 1.0}]
+
+    scored_points = sorted(
+        (
+            {
+                "score": float(row["score"]),
+                "label": float(row["label"]),
+            }
+            for row in sampled_rows
+        ),
+        key=lambda row: row["score"],
+        reverse=True,
+    )
+    total_positive = sum(1 for row in scored_points if row["label"] == 1.0)
+    total_negative = sum(1 for row in scored_points if row["label"] == 0.0)
+    if total_positive == 0 or total_negative == 0:
+        return [{"fpr": 0.0, "tpr": 0.0}, {"fpr": 1.0, "tpr": 1.0}]
+
+    true_positive = 0
+    false_positive = 0
+    roc_points = [{"fpr": 0.0, "tpr": 0.0}]
+    for row in scored_points:
+        if row["label"] == 1.0:
+            true_positive += 1
+        else:
+            false_positive += 1
+        roc_points.append({
+            "fpr": false_positive / total_negative,
+            "tpr": true_positive / total_positive,
+        })
+    if roc_points[-1] != {"fpr": 1.0, "tpr": 1.0}:
+        roc_points.append({"fpr": 1.0, "tpr": 1.0})
 
     if len(roc_points) <= max_points:
         return roc_points

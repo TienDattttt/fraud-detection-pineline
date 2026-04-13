@@ -1,8 +1,8 @@
 """
 Pytest fixtures shared across test modules.
 """
-import sys
 import os
+import sys
 import pytest
 
 # Add project root to path
@@ -10,12 +10,23 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "spark"))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "serving"))
 
+SPARK_TEST_ROOT = os.path.join(PROJECT_ROOT, ".spark-test")
+SPARK_WAREHOUSE_DIR = os.path.join(SPARK_TEST_ROOT, "warehouse")
+SPARK_LOCAL_DIR = os.path.join(SPARK_TEST_ROOT, "local")
+
 
 @pytest.fixture(scope="session")
 def spark():
     """Create a SparkSession for testing (local mode)."""
     try:
         from pyspark.sql import SparkSession
+        os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")
+        os.environ.setdefault("SPARK_LOCAL_HOSTNAME", "localhost")
+        os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+        os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
+        os.makedirs(SPARK_WAREHOUSE_DIR, exist_ok=True)
+        os.makedirs(SPARK_LOCAL_DIR, exist_ok=True)
+
         session = (
             SparkSession.builder
             .master("local[2]")
@@ -23,8 +34,13 @@ def spark():
             .config("spark.sql.shuffle.partitions", "2")
             .config("spark.ui.enabled", "false")
             .config("spark.driver.memory", "1g")
+            .config("spark.driver.host", "127.0.0.1")
+            .config("spark.driver.bindAddress", "127.0.0.1")
+            .config("spark.sql.warehouse.dir", SPARK_WAREHOUSE_DIR)
+            .config("spark.local.dir", SPARK_LOCAL_DIR)
             .getOrCreate()
         )
+        session.sparkContext.setLogLevel("ERROR")
         yield session
         session.stop()
     except ImportError:
