@@ -2,11 +2,12 @@
 Spark Structured Streaming pipeline for real-time fraud detection.
 
 Consumes transactions from Kafka, applies ML model for fraud prediction,
-writes results to HDFS (Parquet) and publishes fraud alerts to Redis.
+writes Medallion layers to HDFS (Delta Lake) and publishes fraud alerts
+to Redis.
 
 Usage (inside spark-master container):
     spark-submit --master spark://spark-master:7077 \
-        --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3 \
+        --packages "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,io.delta:delta-spark_2.12:3.3.0" \
         /opt/spark/work/spark/streaming_pipeline.py
 """
 import os
@@ -35,6 +36,7 @@ from preprocessing import (  # noqa: E402
 # ============================================================
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "transactions")
+#Model path runtime
 MODEL_PATH = os.getenv(
     "MODEL_PATH", "/opt/spark/work/models/fraud_pipeline_model"
 )
@@ -46,15 +48,14 @@ BLACKLIST_ACCOUNTS = tuple(
     for value in os.getenv("BLACKLIST_ACCOUNTS", "").split(",")
     if value.strip()
 )
-BLACKLIST_TRANSFER_TYPES = tuple(
-    value.strip().upper()
-    for value in os.getenv(
-        "BLACKLIST_TRANSFER_TYPES", "TRANSFER"
-    ).split(",")
-    if value.strip()
+HDFS_BRONZE = os.getenv(
+    "HDFS_BRONZE", "hdfs://namenode:8020/datalake/bronze"
 )
-HDFS_OUTPUT = os.getenv(
-    "HDFS_OUTPUT", "hdfs://namenode:8020/datalake/transactions"
+HDFS_SILVER = os.getenv(
+    "HDFS_SILVER", "hdfs://namenode:8020/datalake/silver"
+)
+HDFS_GOLD = os.getenv(
+    "HDFS_GOLD", "hdfs://namenode:8020/datalake/gold"
 )
 HDFS_CHECKPOINT = os.getenv(
     "HDFS_CHECKPOINT", "hdfs://namenode:8020/datalake/checkpoints/streaming"
@@ -67,6 +68,7 @@ REDIS_CHANNEL = "fraud_alerts"
 # ============================================================
 # PaySim JSON schema (matches producer output)
 # ============================================================
+#Schema vào
 PAYSIM_SCHEMA = StructType([
     StructField("step", IntegerType(), True),
     StructField("type", StringType(), True),
@@ -127,70 +129,150 @@ def load_blacklist_accounts(
     )
     return loaded_accounts
 
-
+# Business rules + hybrid scoring
 def add_rule_based_alerts(df, blacklist_accounts):
-    """Combine ML fraud prediction with a blacklist transfer rule."""
+    """
+    Apply business rules and hybrid scoring to combine ML and rule signals.
+
+    Rules:
+      RULE_BLACKLIST  (weight 1.0) — destination in blacklist, immediate alert
+      RULE_DRAIN      (weight 0.5) — account drained to zero after transfer
+      RULE_LARGE_TXN  (weight 0.5) — transaction amount > 200,000
+
+    Hybrid score:
+      rule_score   = min(sum of triggered rule weights, 1.0)
+      hybrid_score = fraud_probability * 0.7 + rule_score * 0.3
+      is_alert     = hybrid_score >= 0.75 OR RULE_BLACKLIST triggered
+    """
     result = df
     blacklist_values = tuple(blacklist_accounts)
     transaction_type = F.upper(
         F.coalesce(F.col("type"), F.lit(""))
     )
 
-    is_ml_alert = F.when(F.col("prediction") == 1.0, 1.0).otherwise(0.0)
-    result = result.withColumn("is_ml_alert", is_ml_alert)
+    # --- ML alert flag ---
+    result = result.withColumn(
+        "is_ml_alert",
+        F.when(F.col("prediction") == 1.0, 1.0).otherwise(0.0),
+    )
 
+    # --- RULE_BLACKLIST: destination in blacklist (weight 1.0) ---
+    if blacklist_values:
+        is_rule_blacklist = F.when(
+            F.col("nameDest").isin(*blacklist_values),
+            1.0,
+        ).otherwise(0.0)
+    else:
+        is_rule_blacklist = F.lit(0.0)
+    result = result.withColumn("is_rule_blacklist", is_rule_blacklist)
+
+    # --- Blacklist destination flag (any type, for display) ---
     if blacklist_values:
         is_blacklist_destination = F.when(
             F.col("nameDest").isin(*blacklist_values), 1.0
         ).otherwise(0.0)
     else:
         is_blacklist_destination = F.lit(0.0)
-
     result = result.withColumn(
         "is_blacklist_destination", is_blacklist_destination
     )
 
-    if blacklist_values and BLACKLIST_TRANSFER_TYPES:
-        is_rule_alert = F.when(
-            (F.col("nameDest").isin(*blacklist_values))
-            & (transaction_type.isin(*BLACKLIST_TRANSFER_TYPES)),
-            1.0
-        ).otherwise(0.0)
-    else:
-        is_rule_alert = F.lit(0.0)
+    # --- RULE_DRAIN: account drained to zero (weight 0.5) ---
+    result = result.withColumn(
+        "is_rule_drain",
+        F.when(
+            (F.col("is_zero_balance_orig") == 1.0)
+            & (transaction_type.isin("TRANSFER", "CASH_OUT")),
+            1.0,
+        ).otherwise(0.0),
+    )
 
-    result = result.withColumn("is_rule_alert", is_rule_alert)
+    # --- RULE_LARGE_TXN: amount > 200,000 (weight 0.5) ---
+    result = result.withColumn(
+        "is_rule_large_txn",
+        F.when(F.col("is_large_amount") == 1.0, 1.0).otherwise(0.0),
+    )
+
+    # --- Backward-compatible aggregate rule flag ---
+    result = result.withColumn(
+        "is_rule_alert",
+        F.when(
+            (F.col("is_rule_blacklist") == 1.0)
+            | (F.col("is_rule_drain") == 1.0)
+            | (F.col("is_rule_large_txn") == 1.0),
+            1.0,
+        ).otherwise(0.0),
+    )
+
+    # --- Rule score: weighted sum capped at 1.0 ---
+    raw_rule_score = (
+        F.col("is_rule_blacklist") * 1.0
+        + F.col("is_rule_drain") * 0.5
+        + F.col("is_rule_large_txn") * 0.5
+    )
+    result = result.withColumn(
+        "rule_score", F.least(raw_rule_score, F.lit(1.0))
+    )
+
+    # --- Hybrid score: ML * 0.7 + Rule * 0.3 ---
+    result = result.withColumn(
+        "hybrid_score",
+        F.col("fraud_probability") * 0.7 + F.col("rule_score") * 0.3,
+    )
+
+    # --- Combined alert: hybrid_score >= 0.75 OR blacklist ---
     result = result.withColumn(
         "is_alert",
         F.when(
-            (F.col("is_ml_alert") == 1.0)
-            | (F.col("is_rule_alert") == 1.0),
-            1.0
-        ).otherwise(0.0)
+            (F.col("hybrid_score") >= 0.75)
+            | (F.col("is_rule_blacklist") == 1.0),
+            1.0,
+        ).otherwise(0.0),
     )
+
+    # --- Alert source label ---
+    result = result.withColumn(
+        "_alert_source_raw",
+        F.when(F.col("is_alert") == 0.0, F.lit("NONE")).otherwise(
+            F.concat_ws(
+                "+",
+                F.when(F.col("is_ml_alert") == 1.0, F.lit("ML")),
+                F.when(
+                    F.col("is_rule_blacklist") == 1.0,
+                    F.lit("BLACKLIST_RULE"),
+                ),
+                F.when(F.col("is_rule_drain") == 1.0, F.lit("DRAIN")),
+                F.when(F.col("is_rule_large_txn") == 1.0, F.lit("LARGE_TXN")),
+            )
+        ),
+    )
+
+    # Normalize labels to the alert-source contract used by serving/tests.
     result = result.withColumn(
         "alert_source",
         F.when(
-            (F.col("is_ml_alert") == 1.0)
-            & (F.col("is_rule_alert") == 1.0),
-            F.lit("ML+BLACKLIST_RULE")
-        )
-        .when(F.col("is_rule_alert") == 1.0, F.lit("BLACKLIST_RULE"))
-        .when(F.col("is_ml_alert") == 1.0, F.lit("ML_MODEL"))
-        .otherwise(F.lit("NONE"))
-    )
+            (F.col("is_alert") == 1.0)
+            & (
+                (F.col("_alert_source_raw") == "")
+                | F.col("_alert_source_raw").isNull()
+            ),
+            F.lit("HYBRID_SCORE"),
+        ).when(
+            F.col("_alert_source_raw") == "ML",
+            F.lit("ML_MODEL"),
+        ).otherwise(F.col("_alert_source_raw"))
+    ).drop("_alert_source_raw")
 
     return result
 
 
 def process_batch(batch_df, batch_id, model, redis_client, blacklist_accounts):
     """
-    Process each micro-batch:
-    1. Apply feature engineering
-    2. Run ML prediction
-    3. Apply rule-based alerts (blacklist)
-    4. Write all results to HDFS (Parquet)
-    5. Publish fraud alerts to Redis
+    Process each micro-batch through Medallion layers:
+    1. BRONZE — persist raw Kafka data to Delta Lake
+    2. SILVER — clean, feature-engineer, persist to Delta Lake
+    3. GOLD  — ML predict, hybrid score, persist to Delta Lake
+    4. Publish fraud alerts to Redis for real-time serving
     """
     if batch_df.isEmpty():
         return
@@ -198,7 +280,22 @@ def process_batch(batch_df, batch_id, model, redis_client, blacklist_accounts):
     raw_count = batch_df.count()
 
     # ------------------------------------------------------------------
-    # Step 1: Feature engineering
+    # BRONZE: Raw data from Kafka → Delta Lake
+    # ------------------------------------------------------------------
+    bronze_df = (
+        batch_df
+        .withColumn("processed_at", F.current_timestamp())
+        .withColumn("dt", F.date_format(F.current_timestamp(), "yyyy-MM-dd"))
+        .withColumn("hour", F.date_format(F.current_timestamp(), "HH"))
+    )
+    bronze_df.write \
+        .mode("append") \
+        .format("delta") \
+        .partitionBy("dt", "hour") \
+        .save(HDFS_BRONZE)
+
+    # ------------------------------------------------------------------
+    # SILVER: Cleaned + feature-engineered → Delta Lake
     # ------------------------------------------------------------------
     cleaned_df = clean_paysim_dataframe(batch_df)
     row_count = cleaned_df.count()
@@ -216,8 +313,20 @@ def process_batch(batch_df, batch_id, model, redis_client, blacklist_accounts):
     )
     featured_df = add_engineered_features(featured_df)
 
+    silver_df = (
+        featured_df
+        .withColumn("processed_at", F.current_timestamp())
+        .withColumn("dt", F.date_format(F.current_timestamp(), "yyyy-MM-dd"))
+        .withColumn("hour", F.date_format(F.current_timestamp(), "HH"))
+    )
+    silver_df.write \
+        .mode("append") \
+        .format("delta") \
+        .partitionBy("dt", "hour") \
+        .save(HDFS_SILVER)
+
     # ------------------------------------------------------------------
-    # Step 2: ML prediction
+    # GOLD: ML prediction + hybrid scoring → Delta Lake
     # ------------------------------------------------------------------
     predictions_df = model.transform(featured_df)
 
@@ -239,36 +348,32 @@ def process_batch(batch_df, batch_id, model, redis_client, blacklist_accounts):
         predictions_df
         .withColumn("processed_at", F.current_timestamp())
         .withColumn("dt", F.date_format(F.current_timestamp(), "yyyy-MM-dd"))
-        .withColumn(
-            "hour", F.date_format(F.current_timestamp(), "HH")
-        )
+        .withColumn("hour", F.date_format(F.current_timestamp(), "HH"))
     )
 
-    # ------------------------------------------------------------------
-    # Step 3: Write to HDFS (Parquet, partitioned by dt/hour)
-    # ------------------------------------------------------------------
-    # Select only the columns we need for storage
+    # Select Gold output columns
     output_cols = [
         "step", "type", "amount", "nameOrig", "oldbalanceOrg",
         "newbalanceOrig", "nameDest", "oldbalanceDest", "newbalanceDest",
         "isFraud", "isFlaggedFraud",
         "prediction", "fraud_probability",
+        "rule_score", "hybrid_score",
         "is_ml_alert", "is_blacklist_destination",
+        "is_rule_blacklist", "is_rule_drain", "is_rule_large_txn",
         "is_rule_alert", "is_alert", "alert_source",
-        "processed_at",
-        "dt", "hour",
+        "processed_at", "dt", "hour",
     ]
 
     output_df = predictions_df.select(output_cols)
 
     output_df.write \
         .mode("append") \
-        .format("parquet") \
+        .format("delta") \
         .partitionBy("dt", "hour") \
-        .save(HDFS_OUTPUT)
+        .save(HDFS_GOLD)
 
     # ------------------------------------------------------------------
-    # Step 4: Publish fraud alerts to Redis
+    # Publish fraud alerts to Redis
     # ------------------------------------------------------------------
     alert_count = predictions_df.filter(F.col("is_alert") == 1.0).count()
     ml_alert_count = predictions_df.filter(
@@ -296,10 +401,12 @@ def process_batch(batch_df, batch_id, model, redis_client, blacklist_accounts):
                 .select(
                     "step", "type", "amount",
                     "nameOrig", "nameDest",
-                    "fraud_probability",
+                    "fraud_probability", "rule_score", "hybrid_score",
                     "oldbalanceOrg", "newbalanceOrig",
                     "is_ml_alert", "is_blacklist_destination",
-                    "is_rule_alert", "alert_source",
+                    "is_rule_blacklist", "is_rule_drain",
+                    "is_rule_large_txn", "is_rule_alert",
+                    "alert_source",
                 )
                 .collect()
             )
@@ -314,12 +421,17 @@ def process_batch(batch_df, batch_id, model, redis_client, blacklist_accounts):
                     "fraud_probability": round(
                         row["fraud_probability"], 4
                     ),
+                    "rule_score": round(row["rule_score"], 4),
+                    "hybrid_score": round(row["hybrid_score"], 4),
                     "oldbalanceOrg": row["oldbalanceOrg"],
                     "newbalanceOrig": row["newbalanceOrig"],
                     "is_ml_alert": int(row["is_ml_alert"]),
                     "is_blacklist_destination": int(
                         row["is_blacklist_destination"]
                     ),
+                    "is_rule_blacklist": int(row["is_rule_blacklist"]),
+                    "is_rule_drain": int(row["is_rule_drain"]),
+                    "is_rule_large_txn": int(row["is_rule_large_txn"]),
                     "is_rule_alert": int(row["is_rule_alert"]),
                     "alert_source": row["alert_source"],
                 }
@@ -351,19 +463,28 @@ def main():
     print("=" * 60)
     print("🚀 Real-time Fraud Detection — Streaming Pipeline")
     print("=" * 60)
-
+#App Spark streaming — Delta Lake enabled
     spark = (
         SparkSession.builder
         .appName("FraudDetection-Streaming")
         .config(
             "spark.jars.packages",
-            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3"
+            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,"
+            "io.delta:delta-spark_2.12:3.3.0"
+        )
+        .config(
+            "spark.sql.extensions",
+            "io.delta.sql.DeltaSparkSessionExtension"
+        )
+        .config(
+            "spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog"
         )
         .config("spark.sql.adaptive.enabled", "true")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")
-
+#Load model đã train sẵn
     # ------------------------------------------------------------------
     # Load ML model
     # ------------------------------------------------------------------
@@ -417,13 +538,11 @@ def main():
     # Start foreachBatch processing
     # ------------------------------------------------------------------
     print("\n⏳ Starting streaming query...")
-    print(f"   HDFS output: {HDFS_OUTPUT}")
+    print(f"   HDFS Bronze: {HDFS_BRONZE}")
+    print(f"   HDFS Silver: {HDFS_SILVER}")
+    print(f"   HDFS Gold:   {HDFS_GOLD}")
     print(f"   Redis channel: {REDIS_CHANNEL}")
     print(f"   Blacklist file: {BLACKLIST_PATH}")
-    print(
-        "   Blacklist rule types: "
-        + ", ".join(BLACKLIST_TRANSFER_TYPES)
-    )
     print("   Press Ctrl+C to stop.\n")
 
     query = (
@@ -433,8 +552,8 @@ def main():
                 df, bid, model, redis_client, blacklist_accounts
             )
         )
-        .option("checkpointLocation", HDFS_CHECKPOINT)
-        .trigger(processingTime="10 seconds")
+        .option("checkpointLocation", HDFS_CHECKPOINT) #Checkpoint 
+        .trigger(processingTime="10 seconds") #Trigger 10 giây
         .start()
     )
 

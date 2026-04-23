@@ -52,14 +52,26 @@ until curl -s http://localhost:8081/ > /dev/null 2>&1; do
 done
 echo -e " ${GREEN}OK${NC}"
 
+echo -n "  HDFS safemode..."
+until docker exec namenode hdfs dfsadmin -safemode get 2>/dev/null | grep -q "Safe mode is OFF"; do
+    echo -n "."
+    sleep 2
+done
+echo -e " ${GREEN}OK${NC}"
+
 # ------------------------------------------------------------------
 # Step 3: Setup HDFS directories
 # ------------------------------------------------------------------
 echo -e "\n${YELLOW}[3/5] Setting up HDFS directories...${NC}"
-docker exec namenode hdfs dfs -mkdir -p /datalake/transactions
+docker exec namenode hdfs dfs -mkdir -p /datalake/bronze
+docker exec namenode hdfs dfs -mkdir -p /datalake/silver
+docker exec namenode hdfs dfs -mkdir -p /datalake/gold
 docker exec namenode hdfs dfs -mkdir -p /datalake/checkpoints/streaming
 docker exec namenode hdfs dfs -chmod -R 777 /datalake
 echo -e "  ${GREEN}HDFS directories created${NC}"
+if docker exec namenode hdfs dfs -test -d /datalake/transactions; then
+    echo "  Legacy directory detected: /datalake/transactions (unused by current Medallion flow)"
+fi
 
 # ------------------------------------------------------------------
 # Step 4: Create Kafka topic
@@ -104,7 +116,7 @@ echo "     docker exec spark-master spark-submit /opt/spark/work/spark/train_mod
 echo ""
 echo "  2. Start streaming:"
 echo "     docker exec spark-master spark-submit \\"
-echo "       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3 \\"
+echo "       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,io.delta:delta-spark_2.12:3.3.0 \\"
 echo "       /opt/spark/work/spark/streaming_pipeline.py"
 echo ""
 echo "  3. Start producer:"

@@ -52,6 +52,27 @@ function Wait-UntilReady {
     Write-Host " OK"
 }
 
+function Get-HdfsSafeModeStatus {
+    $output = & docker exec namenode hdfs dfsadmin -safemode get 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+    return ($output | Out-String).Trim()
+}
+
+function Wait-HdfsWritable {
+    Write-Host -NoNewline "  HDFS safemode..."
+    while ($true) {
+        $status = Get-HdfsSafeModeStatus
+        if ($status -and $status -match "Safe mode is OFF") {
+            break
+        }
+        Write-Host -NoNewline "."
+        Start-Sleep -Seconds 2
+    }
+    Write-Host " OK"
+}
+
 Push-Location $script:ProjectRoot
 try {
     Write-Host "================================="
@@ -87,10 +108,16 @@ try {
     }
 
     Write-Step "3/5" "Setting up HDFS directories..."
-    docker exec namenode hdfs dfs -mkdir -p /datalake/transactions
+    Wait-HdfsWritable
+    docker exec namenode hdfs dfs -mkdir -p /datalake/bronze
+    docker exec namenode hdfs dfs -mkdir -p /datalake/silver
+    docker exec namenode hdfs dfs -mkdir -p /datalake/gold
     docker exec namenode hdfs dfs -mkdir -p /datalake/checkpoints/streaming
     docker exec namenode hdfs dfs -chmod -R 777 /datalake
     Write-Host "  HDFS directories created"
+    if (Test-DockerExec -Arguments @("namenode", "hdfs", "dfs", "-test", "-d", "/datalake/transactions")) {
+        Write-Host "  Legacy directory detected: /datalake/transactions (unused by current Medallion flow)"
+    }
 
     Write-Step "4/5" "Creating Kafka topic..."
     docker exec kafka /opt/kafka/bin/kafka-topics.sh `
@@ -128,7 +155,7 @@ try {
     Write-Host "     docker exec spark-master spark-submit /opt/spark/work/spark/train_model.py"
     Write-Host ""
     Write-Host "  2. Start streaming:"
-    Write-Host "     docker exec spark-master spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3 /opt/spark/work/spark/streaming_pipeline.py"
+    Write-Host "     docker exec spark-master spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,io.delta:delta-spark_2.12:3.3.0 /opt/spark/work/spark/streaming_pipeline.py"
     Write-Host ""
     Write-Host "  3. Start producer:"
     Write-Host "     docker exec spark-master python3 /opt/spark/work/producer/kafka_producer.py --speed 0.5"

@@ -14,7 +14,7 @@ import sys
 
 from kafka import KafkaProducer
 
-
+#Topic Kafka transactions
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
 TOPIC_NAME = os.getenv("KAFKA_TOPIC", "transactions")
 CSV_FILE_PATH = os.getenv(
@@ -28,7 +28,7 @@ FLOAT_FIELDS = [
 ]
 INT_FIELDS = ["step", "isFraud", "isFlaggedFraud"]
 
-
+#Hàm parse JSON giao dịch
 def parse_row(row: dict) -> dict:
     """Cast PaySim CSV string values to proper numeric types."""
     parsed = {}
@@ -64,7 +64,7 @@ def create_producer(retries: int = 5) -> KafkaProducer:
     print("💀 Could not connect to Kafka. Exiting.")
     sys.exit(1)
 
-
+#Producer đọc CSV và gửi Kafka
 def run_producer(speed: float = 1.0, limit: int = 0):
     """
     Stream PaySim CSV rows to Kafka.

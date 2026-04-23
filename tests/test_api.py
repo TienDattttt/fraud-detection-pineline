@@ -104,7 +104,13 @@ class TestRecentAlertsEndpoint:
     def test_recent_alerts_with_data(self, client, mock_redis):
         """Returns parsed alerts from Redis list."""
         alerts = [
-            json.dumps({"type": "TRANSFER", "amount": 500000}),
+            json.dumps({
+                "type": "TRANSFER",
+                "amount": 500000,
+                "rule_score": 1.0,
+                "hybrid_score": 0.965,
+                "alert_source": "ML+BLACKLIST_RULE",
+            }),
             json.dumps({"type": "CASH_OUT", "amount": 200000}),
         ]
         mock_redis.lrange = AsyncMock(return_value=alerts)
@@ -113,6 +119,9 @@ class TestRecentAlertsEndpoint:
         data = response.json()
         assert data["count"] == 2
         assert data["alerts"][0]["type"] == "TRANSFER"
+        assert data["alerts"][0]["hybrid_score"] == pytest.approx(0.965)
+        assert data["alerts"][0]["rule_score"] == pytest.approx(1.0)
+        assert data["alerts"][0]["alert_source"] == "ML+BLACKLIST_RULE"
 
     def test_recent_alerts_limit(self, client, mock_redis):
         """Respects limit parameter."""

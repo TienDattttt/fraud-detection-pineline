@@ -30,6 +30,7 @@ FLOAT_COLUMNS = [
     "newbalanceDest",
 ]
 INT_COLUMNS = ["step", "isFlaggedFraud"]
+#Validate cột
 REQUIRED_COLUMNS = [
     "step",
     "type",
@@ -70,7 +71,7 @@ NUMERIC_FEATURES = [
 ]
 ASSEMBLER_INPUT_COLS = NUMERIC_FEATURES + ["type_index"]
 
-
+#Validate cột
 def validate_required_columns(df: DataFrame) -> None:
     """Raise a clear error when the PaySim schema is incomplete."""
     missing_columns = sorted(
@@ -82,7 +83,7 @@ def validate_required_columns(df: DataFrame) -> None:
             + ", ".join(missing_columns)
         )
 
-
+#Chuẩn hóa chuỗi
 def normalize_string_columns(df: DataFrame) -> DataFrame:
     """Trim and normalize string columns used by the PaySim pipeline."""
     result = df
@@ -105,7 +106,7 @@ def normalize_string_columns(df: DataFrame) -> DataFrame:
 
     return result
 
-
+#Làm sạch dữ liệu
 def clean_paysim_dataframe(df: DataFrame) -> DataFrame:
     """
     Clean and standardize a raw PaySim DataFrame.
@@ -182,7 +183,7 @@ def add_engineered_features(df: DataFrame) -> DataFrame:
 
     return result
 
-
+#Tạo feature pipeline
 def create_feature_pipeline() -> Pipeline:
     """
     Build the PySpark feature pipeline used by the deployed model.

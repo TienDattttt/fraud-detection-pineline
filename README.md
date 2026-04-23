@@ -10,8 +10,8 @@
 │                                                        │                        │
 │                                          ┌─────────────┼──────────────┐         │
 │                                          ▼             ▼              ▼         │
-│                                     Load Model    HDFS Parquet    Redis Pub/Sub │
-│                                  (PipelineModel)  (dt/hour part)  (fraud_alerts)│
+│                                  Load Model    HDFS Delta Lake   Redis Pub/Sub  │
+│                               (PipelineModel) (Bronze/Silver/Gold) (fraud_alerts)│
 │                                                                       │         │
 │                                                          FastAPI ◄────┘         │
 │                                                     /kpis /alerts /stream       │
@@ -63,7 +63,7 @@ notebooks/01_paysim_eda_preprocessing_training.ipynb
 ### 5. Chạy Streaming Pipeline
 ```bash
 docker exec spark-master spark-submit \
-    --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3 \
+    --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,io.delta:delta-spark_2.12:3.3.0 \
     /opt/spark/work/spark/streaming_pipeline.py
 ```
 
@@ -82,12 +82,18 @@ docker exec spark-master python3 /opt/spark/work/producer/kafka_producer.py --sp
 - Spark UI: http://localhost:8081
 - Frontend can consume these APIs from a separate Next.js/Vercel repo
 
-## Blacklist Rule
+## Hybrid Fraud Detection
 
 The streaming pipeline combines:
 - ML fraud prediction from the trained PaySim model
-- A rule-based alert for `TRANSFER` transactions into destination
-  accounts listed in `data/blacklist_accounts.txt`
+- A rule-based alert engine for:
+  destination blacklist matches, drain-to-zero behavior, and
+  large-value transactions
+- Hybrid scoring:
+  `hybrid_score = fraud_probability * 0.7 + rule_score * 0.3`
+
+`RULE_BLACKLIST` bypasses the score threshold and triggers an alert
+immediately because it represents a high-severity signal.
 
 You can customize the blacklist with:
 ```bash
@@ -96,13 +102,12 @@ data/blacklist_accounts.txt
 
 # or override via env when running spark-submit
 BLACKLIST_ACCOUNTS=C553264065,C38997010
-BLACKLIST_TRANSFER_TYPES=TRANSFER
 ```
 
 ## Dataset Strategy
 
 - `PaySim` is the primary dataset for the real-time pipeline:
-  producer -> Kafka -> Spark Structured Streaming -> Redis/HDFS
+  producer -> Kafka -> Spark Structured Streaming -> Redis/Delta Lake
 - `creditcard.csv` is kept only as an optional reference dataset
   outside the main automated pipeline
 - The live streaming demo, blacklist rule, and alert APIs are all built
@@ -122,7 +127,7 @@ fraud-detection-pipeline/
 ├── spark/
 │   ├── preprocessing.py        # PaySim cleaning + feature engineering
 │   ├── train_model.py          # PaySim RF vs GBT training + validation/test metrics
-│   ├── streaming_pipeline.py   # Kafka → ML predict → HDFS + Redis
+│   ├── streaming_pipeline.py   # Kafka → Bronze/Silver/Gold + Redis alerts
 │   └── requirements.txt
 ├── notebooks/
 │   └── 01_paysim_eda_preprocessing_training.ipynb
@@ -134,7 +139,7 @@ fraud-detection-pipeline/
 │   └── requirements.txt
 ├── tests/
 │   ├── conftest.py             # SparkSession fixtures
-│   ├── test_preprocessing.py   # 16 tests cho cleaning + features + blacklist rules
+│   ├── test_preprocessing.py   # 17 tests cho cleaning + features + hybrid rules
 │   └── test_api.py             # 8 integration tests cho API endpoints
 ├── scripts/
 │   ├── start_pipeline.sh       # One-command startup
@@ -193,7 +198,7 @@ pytest tests/test_api.py -v
 |-------|-----------|
 | Message Queue | Apache Kafka 3.7 (KRaft mode) |
 | Stream Processing | Apache Spark 3.5.3 Structured Streaming |
-| Storage | HDFS (Parquet) |
+| Storage | HDFS + Delta Lake (Bronze / Silver / Gold) |
 | ML | PySpark MLlib + MLflow |
 | Serving | FastAPI + Redis Pub/Sub + SSE |
 | Infrastructure | Docker Compose |

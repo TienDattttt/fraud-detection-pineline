@@ -5,6 +5,13 @@ Tests feature engineering functions and ML pipeline creation.
 All tests use PySpark local mode — no cluster needed.
 """
 import pytest
+from pyspark.sql.types import (
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+)
 
 
 class TestCleanPaySimDataframe:
@@ -26,9 +33,22 @@ class TestCleanPaySimDataframe:
             "nameDest", "oldbalanceDest", "newbalanceDest",
             "isFraud", "isFlaggedFraud",
         ]
+        schema = StructType([
+            StructField("step", IntegerType(), True),
+            StructField("type", StringType(), True),
+            StructField("amount", DoubleType(), True),
+            StructField("nameOrig", StringType(), True),
+            StructField("oldbalanceOrg", DoubleType(), True),
+            StructField("newbalanceOrig", DoubleType(), True),
+            StructField("nameDest", StringType(), True),
+            StructField("oldbalanceDest", DoubleType(), True),
+            StructField("newbalanceDest", DoubleType(), True),
+            StructField("isFraud", IntegerType(), True),
+            StructField("isFlaggedFraud", IntegerType(), True),
+        ])
 
         row = clean_paysim_dataframe(
-            spark.createDataFrame(rows, columns)
+            spark.createDataFrame(rows, schema=schema)
         ).collect()[0]
 
         assert row["type"] == "TRANSFER"
@@ -213,14 +233,16 @@ class TestCreateFeaturePipeline:
 
 
 class TestStreamingBlacklistRules:
-    """Test blacklist-based rule alert enrichment."""
+    """Test hybrid rule enrichment for streaming predictions."""
 
     def test_blacklist_transfer_becomes_rule_alert(self, sample_paysim_data):
         """TRANSFER into a blacklisted destination should trigger rule alert."""
+        from preprocessing import add_engineered_features
         from streaming_pipeline import add_rule_based_alerts
         from pyspark.sql import functions as F
 
-        predictions = sample_paysim_data.withColumn("prediction", F.lit(0.0))
+        predictions = add_engineered_features(sample_paysim_data)
+        predictions = predictions.withColumn("prediction", F.lit(0.0))
         predictions = predictions.withColumn(
             "fraud_probability", F.lit(0.05)
         )
@@ -235,16 +257,21 @@ class TestStreamingBlacklistRules:
         )
 
         assert transfer_row["is_blacklist_destination"] == 1.0
+        assert transfer_row["is_rule_blacklist"] == 1.0
+        assert transfer_row["is_rule_drain"] == 1.0
         assert transfer_row["is_rule_alert"] == 1.0
+        assert transfer_row["rule_score"] == pytest.approx(1.0)
+        assert transfer_row["hybrid_score"] == pytest.approx(0.335)
         assert transfer_row["is_alert"] == 1.0
-        assert transfer_row["alert_source"] == "BLACKLIST_RULE"
+        assert transfer_row["alert_source"] == "BLACKLIST_RULE+DRAIN"
 
     def test_ml_alert_and_blacklist_merge_sources(self, sample_paysim_data):
         """ML and blacklist alerts should be merged into a combined source."""
+        from preprocessing import add_engineered_features
         from streaming_pipeline import add_rule_based_alerts
         from pyspark.sql import functions as F
 
-        predictions = sample_paysim_data.withColumn(
+        predictions = add_engineered_features(sample_paysim_data).withColumn(
             "prediction",
             F.when(F.col("nameDest") == "C553264065", 1.0).otherwise(0.0)
         ).withColumn("fraud_probability", F.lit(0.95))
@@ -259,19 +286,21 @@ class TestStreamingBlacklistRules:
         )
 
         assert transfer_row["is_ml_alert"] == 1.0
+        assert transfer_row["is_rule_drain"] == 1.0
         assert transfer_row["is_rule_alert"] == 1.0
         assert transfer_row["is_alert"] == 1.0
-        assert transfer_row["alert_source"] == "ML+BLACKLIST_RULE"
+        assert transfer_row["alert_source"] == "ML+BLACKLIST_RULE+DRAIN"
 
-    def test_blacklist_non_transfer_does_not_trigger_rule(self, spark):
-        """A blacklisted destination alone should not alert on non-transfer types."""
+    def test_blacklist_non_transfer_still_triggers_rule(self, spark):
+        """Blacklist should bypass transaction-type gating in the upgraded flow."""
+        from preprocessing import add_engineered_features
         from streaming_pipeline import add_rule_based_alerts
         from pyspark.sql import functions as F
 
         data = [
             (
-                1, "CASH_OUT", 9000.0, "C100", 9000.0, 0.0,
-                "C553264065", 0.0, 9000.0, 0, 0,
+                1, "PAYMENT", 8000.0, "C100", 9000.0, 1000.0,
+                "C553264065", 0.0, 8000.0, 0, 0,
             ),
         ]
         columns = [
@@ -281,7 +310,9 @@ class TestStreamingBlacklistRules:
             "isFraud", "isFlaggedFraud",
         ]
 
-        predictions = spark.createDataFrame(data, columns).withColumn(
+        predictions = add_engineered_features(
+            spark.createDataFrame(data, columns)
+        ).withColumn(
             "prediction", F.lit(0.0)
         ).withColumn("fraud_probability", F.lit(0.02))
 
@@ -291,6 +322,41 @@ class TestStreamingBlacklistRules:
         ).collect()[0]
 
         assert row["is_blacklist_destination"] == 1.0
-        assert row["is_rule_alert"] == 0.0
-        assert row["is_alert"] == 0.0
-        assert row["alert_source"] == "NONE"
+        assert row["is_rule_blacklist"] == 1.0
+        assert row["is_rule_alert"] == 1.0
+        assert row["rule_score"] == pytest.approx(1.0)
+        assert row["is_alert"] == 1.0
+        assert row["alert_source"] == "BLACKLIST_RULE"
+
+    def test_drain_and_large_rules_contribute_to_hybrid_alert(
+        self,
+        sample_paysim_data,
+    ):
+        """Drain and large-amount rules should raise the capped hybrid score."""
+        from preprocessing import add_engineered_features
+        from streaming_pipeline import add_rule_based_alerts
+        from pyspark.sql import functions as F
+
+        predictions = add_engineered_features(sample_paysim_data).withColumn(
+            "prediction",
+            F.when(F.col("amount") == 500000.0, 1.0).otherwise(0.0)
+        ).withColumn(
+            "fraud_probability",
+            F.when(F.col("amount") == 500000.0, 0.9).otherwise(0.1)
+        )
+
+        result = add_rule_based_alerts(
+            predictions,
+            blacklist_accounts=[],
+        )
+        row = next(
+            candidate for candidate in result.collect()
+            if candidate["amount"] == 500000.0
+        )
+
+        assert row["is_rule_drain"] == 1.0
+        assert row["is_rule_large_txn"] == 1.0
+        assert row["rule_score"] == pytest.approx(1.0)
+        assert row["hybrid_score"] == pytest.approx(0.93)
+        assert row["is_alert"] == 1.0
+        assert row["alert_source"] == "ML+DRAIN+LARGE_TXN"

@@ -96,10 +96,15 @@ class AlertItem(BaseModel):
     nameOrig: Optional[str] = None
     nameDest: Optional[str] = None
     fraud_probability: Optional[float] = None
+    rule_score: Optional[float] = None
+    hybrid_score: Optional[float] = None
     oldbalanceOrg: Optional[float] = None
     newbalanceOrig: Optional[float] = None
     is_ml_alert: Optional[int] = None
     is_blacklist_destination: Optional[int] = None
+    is_rule_blacklist: Optional[int] = None
+    is_rule_drain: Optional[int] = None
+    is_rule_large_txn: Optional[int] = None
     is_rule_alert: Optional[int] = None
     alert_source: Optional[str] = None
 
